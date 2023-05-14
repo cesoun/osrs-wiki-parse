@@ -4,6 +4,13 @@ const xray = require('x-ray')({
 	filters: {
 		quest_req: (value) => {
 			let req = value.split('-');
+
+			// Join quests that have a '-' in their name. (RFD, Fairytale, ...)
+			if (req.length === 3) {
+				req = [req[0], req.slice(1).join('-')]
+			}
+
+			// If the quest contains a *, we'll split it here to determine boostable length.
 			req = [
 				Number(req[0].replace(' ', '')),
 				...req[1].replace(/^\s+|\s+$/g, '').split('*'),
@@ -60,6 +67,9 @@ const SKILL_REQ_END_IDX = 25;
 
 		return quest;
 	});
+
+	// fix the quest names.
+	populatedQuests.forEach((quest, idx) => populatedQuests[idx].name = fixQuestNames(quest.name));
 
 	await fs.writeFile('./quests.json', JSON.stringify(populatedQuests, null, 4), err => {
 		if (err) {
@@ -121,7 +131,7 @@ async function parseGuide() {
 		}
 
 		return {
-			name: quest,
+			name: quest.includes('/') ? quest.replace('/', ' - ') : quest,
 			uri: `https://oldschool.runescape.wiki/w/${quest.replaceAll(' ', '_')}`,
 			reqs: [],
 		};
@@ -129,6 +139,32 @@ async function parseGuide() {
 
 	// remove undefined(s)
 	return quests.filter((quest) => quest);
+}
+
+// fix quest names and adjust RFD names to match RuneLite API.
+function fixQuestNames(quest) {
+	// https://github.com/runelite/runelite/blob/master/runelite-api/src/main/java/net/runelite/api/Quest.java
+	const RUNELITE_RFD_QUEST_NAMES = {
+		"Another Cook's Quest": "Another Cook's Quest",
+		"Freeing the Goblin generals": "Wartface & Bentnoze",
+		"Freeing the Mountain Dwarf": "Mountain Dwarf",
+		"Freeing Evil Dave": "Evil Dave",
+		"Freeing Pirate Pete": "Pirate Pete",
+		"Freeing the Lumbridge Guide": "Lumbridge Guide",
+		"Freeing Skrach Uglogwee": "Skrach Uglogwee",
+		"Freeing Sir Amik Varze": "Sir Amik Varze",
+		"Freeing King Awowogei": "King Awowogei",
+		"Defeating the Culinaromancer": "Culinaromancer"
+	}
+
+	// Check for RFD
+	subquest = quest.split(' - ');
+	if (subquest.length === 2 && subquest[0].includes('Recipe')) {
+		subquest[1] = RUNELITE_RFD_QUEST_NAMES[subquest[1]];
+		quest = subquest.join(' - ');
+	}
+
+	return quest;
 }
 
 // parse: Quests/Skill_requirements
