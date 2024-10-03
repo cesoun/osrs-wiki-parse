@@ -105,7 +105,10 @@ async function parseGuide() {
 
 	// Map them to object structure. {name, uri, reqs[]}
 	let quests = tbodies.quests.map((quest) => {
-		let whitelist = ['The Grand Tree'];
+		let whitelist = [
+			'The Grand Tree',
+			'Defender of Varrock'
+		];
 
 		let blacklist = [
 			'diary',
