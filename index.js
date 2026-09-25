@@ -38,17 +38,24 @@ const SECTION_NUMBER_PLACEHOLDER = '{SECTION_NUM}';
 const GUIDE_PAGE = 'Optimal_quest_guide';
 const GUIDE_SECTION_IDX = 2;
 
-// Define the Quests/Skill_requirements identifier.
-const SKILL_REQUIREMENTS_PAGE = 'Quests/Skill_requirements';
-
-// The idx consts define the section where the skills start and end. (agility ... woodcutting)
-const SKILL_REQ_START_IDX = 1;
-const SKILL_REQ_END_IDX = 25;
+// Define the current quest requirements page.
+const SKILL_REQUIREMENTS_PAGE = 'Quests/Requirements_by_skill';
 
 // Entrypoint
 (async () => {
 	let quests = await parseGuide();
 	let requirements = await parseRequirements();
+
+	// Normalise quest names before matching requirements.
+	quests.forEach((quest) => {
+		quest.name = fixQuestNames(quest.name);
+	});
+
+	for (const req of requirements) {
+		for (const questReq of req.quests) {
+			questReq.quest = fixQuestNames(questReq.quest);
+		}
+	}
 
 	let populatedQuests = quests.map((quest) => {
 		// Loop through all requirements.
@@ -68,8 +75,6 @@ const SKILL_REQ_END_IDX = 25;
 		return quest;
 	});
 
-	// fix the quest names.
-	populatedQuests.forEach((quest, idx) => populatedQuests[idx].name = fixQuestNames(quest.name));
 
 	await fs.writeFile('./quests.json', JSON.stringify(populatedQuests, null, 4), err => {
 		if (err) {
@@ -146,7 +151,6 @@ async function parseGuide() {
 
 // fix quest names and adjust RFD names to match RuneLite API.
 function fixQuestNames(quest) {
-	// https://github.com/runelite/runelite/blob/master/runelite-api/src/main/java/net/runelite/api/Quest.java
 	const RUNELITE_RFD_QUEST_NAMES = {
 		"Another Cook's Quest": "Another Cook's Quest",
 		"Freeing the Goblin generals": "Wartface & Bentnoze",
@@ -158,62 +162,141 @@ function fixQuestNames(quest) {
 		"Freeing Sir Amik Varze": "Sir Amik Varze",
 		"Freeing King Awowogei": "King Awowogei",
 		"Defeating the Culinaromancer": "Culinaromancer"
+	};
+
+	// Current OSRS Wiki format:
+	// Recipe for Disaster/Freeing King Awowogei
+	if (quest.startsWith('Recipe for Disaster/')) {
+		const subquest = quest.substring('Recipe for Disaster/'.length);
+
+		if (RUNELITE_RFD_QUEST_NAMES[subquest]) {
+			return `Recipe for Disaster - ${RUNELITE_RFD_QUEST_NAMES[subquest]}`;
+		}
 	}
 
-	// Check for RFD
-	subquest = quest.split(' - ');
-	if (subquest.length === 2 && subquest[0].includes('Recipe')) {
+	// Older Wiki format retained for compatibility:
+	// Recipe for Disaster - Freeing King Awowogei
+	const subquest = quest.split(' - ');
+
+	if (
+		subquest.length === 2 &&
+		subquest[0].includes('Recipe') &&
+		RUNELITE_RFD_QUEST_NAMES[subquest[1]]
+	) {
 		subquest[1] = RUNELITE_RFD_QUEST_NAMES[subquest[1]];
-		quest = subquest.join(' - ');
+		return subquest.join(' - ');
 	}
 
 	return quest;
 }
 
-// parse: Quests/Skill_requirements
+// Parse quest skill requirements.
 async function parseRequirements() {
-	const skillPageURI = API_BASE_URI.replace(
+	const cheerio = require('cheerio');
+
+	const pageURI = API_BASE_URI.replace(
 		PAGE_NAME_PLACEHOLDER,
 		SKILL_REQUIREMENTS_PAGE
 	);
 
-	// array for all the requirements
-	let allRequirements = [];
+	console.log('fetching current quest skill requirements');
 
-	// Loop through all requirements
-	for (let i = SKILL_REQ_START_IDX; i <= SKILL_REQ_END_IDX; i++) {
-		console.log(
-			'parsing quest requirement: %d of %d',
-			i,
-			SKILL_REQ_END_IDX
-		);
+	const html = await getRequestHTML(pageURI);
+	const $ = cheerio.load(html);
 
-		// Setup uri for the current section.
-		let sectionURI = skillPageURI.concat(
-			API_QUERY_SECTION.replace(SECTION_NUMBER_PLACEHOLDER, i)
-		);
+	const skills = new Map();
 
-		// GET
-		let html = await getRequestHTML(sectionURI);
+	$('tr[data-rowid]').each((index, row) => {
+		const questName = $(row).attr('data-rowid');
 
-		// Extract skill + quest reqs.
-		let skillRequirements = await xray(html, 'div', {
-			skill: xray('div:nth-child(1)', 'a@title'),
-			quests: xray('div:nth-child(2)', ['li | quest_req']),
+		if (!questName) {
+			return;
+		}
+
+		$(row).find('[data-skill][data-level]').each((i, element) => {
+			const skill = $(element).attr('data-skill');
+			const level = parseInt($(element).attr('data-level'), 10);
+
+			if (!skill || Number.isNaN(level)) {
+				return;
+			}
+
+			if (!skills.has(skill)) {
+				skills.set(skill, []);
+			}
+
+			const questRequirements = skills.get(skill);
+
+			const existing = questRequirements.find(
+				req => req.quest === questName
+			);
+
+			// The third cell in the individual skill table is the Boostable column.
+			const cells = $(row).children('td');
+			const boostableText = cells.eq(2).text().trim().toLowerCase();
+
+			const boostable =
+				boostableText === 'yes' ||
+				boostableText.includes('yes');
+
+			if (!existing) {
+				questRequirements.push({
+					quest: questName,
+					level: level,
+					boostable: boostable
+				});
+			} else {
+				if (level > existing.level) {
+					existing.level = level;
+				}
+
+				if (boostable) {
+					existing.boostable = true;
+				}
+			}
 		});
+	});
 
-		allRequirements.push(skillRequirements);
-	}
+	const result = [];
 
-	return allRequirements;
+	skills.forEach((quests, skill) => {
+		result.push({
+			skill: skill,
+			quests: quests
+		});
+	});
+
+	const totalRequirements = result.reduce(
+		(total, skill) => total + skill.quests.length,
+		0
+	);
+
+	console.log(
+		`parsed ${totalRequirements} skill requirements across ${result.length} skills`
+	);
+
+	return result;
 }
 
 // do get request to uri and return html
 async function getRequestHTML(uri) {
-	let res = await axios.get(uri);
+	let res = await axios.get(uri, {
+		headers: {
+			'User-Agent': 'osrs-wiki-parse/1.0'
+		}
+	});
+
 	if (res.status !== 200) {
-		throw new Error('request failed with error', res.status);
+		throw new Error(`Request failed with status ${res.status}`);
 	}
 
-	return res.data['parse']['text']['*'];
+	if (!res.data.parse || !res.data.parse.text) {
+		console.error('\nWiki API error for:');
+		console.error(uri);
+		console.error('\nResponse:');
+		console.error(JSON.stringify(res.data, null, 2));
+		throw new Error('Wiki API did not return parsed HTML');
+	}
+
+	return res.data.parse.text['*'];
 }
